@@ -79,7 +79,7 @@ input[type=text],input[type=number],input[type=password],select{padding:8px 10px
 .sk{background:linear-gradient(90deg,var(--sf) 25%,var(--ln) 50%,var(--sf) 75%);background-size:200% 100%;animation:sh 1.2s infinite;border:0;border-radius:10px}
 @keyframes sh{to{background-position:-200% 0}}
 @media (prefers-reduced-motion:reduce){.sk{animation:none}}
-.nb{color:var(--mu);font-size:12px;margin:0 12px 6px}
+a.sec{text-decoration:none;display:inline-block;color:var(--tx)}
 </style>
 </head>
 <body>
@@ -120,10 +120,10 @@ const maxPrice = () => Math.max(100, Math.ceil(Math.max(0, ...P.map(sale)) / 50)
 // ===== State =====
 let ACC = LS("bz_acc") || {};
 const S = {view:"home",prev:"home",q:"",cat:"All",max:0,r4:false,sort:"rel",pid:null,cart:[],orders:[],hist:LS("sk_hist")||[],user:LS("bz_user"),uid:null,mode:"in",back:null,rf:[],prof:null,adm:false,nid:1001,
-  cfg:{refReward:50},banners:[],dirtyP:new Set(),dirtyB:false,dirtyR:false};
+  cfg:{refReward:50},banners:[],isA:false,costs:{},ocost:{},coupons:[],cps:[],cp:null,coupon:"",at:"Overview",ep:null,pq:"",oq:"",dirtyP:new Set(),dirtyB:false,dirtyR:false};
 if (!ACC[S.user]) S.user = null; else S.prof = ACC[S.user].prof || null;
 let CO = {}; // "customers also bought" strength per product, from Supabase also_bought()
-const isAdm = () => ADMINS.length ? ADMINS.includes(S.user) : S.adm;
+const isAdm = () => !!S.isA; // decided by the database (admins table)
 const svc = p => /^\d{5}$/.test(p) && p[0] !== "9"; // 5-digit Kenyan postcode; starting with 9 = not serviceable (demo)
 const eta = p => ["3–4","4–6","5–7"][p[0] % 3] + " days";
 const nm = m => { const x = /^(?:\+?254|0)([17]\d{8})$/.exec(String(m).replace(/[\s-]/g, "")); return x ? "254" + x[1] : null; };
@@ -134,17 +134,17 @@ const rowP = r => ({id:r.id, title:r.title, category:r.category, image:r.emoji |
 const rowB = r => ({id:r.id, t:r.title, s:r.subtitle, img:r.img_url || "", cat:r.target, c:r.color});
 let loaded = false, loadErr = "", lastSig = "";
 function applyCatalog(d) { CATS = {}; (d.c || []).forEach(c => CATS[c.name] = [c.color, c.emoji]);
-  P = (d.p || []).map(rowP); S.banners = (d.b || []).map(rowB); S.cfg.refReward = d.r != null ? +d.r : 50; }
+  P = (d.p || []).map(rowP); S.banners = (d.b || []).map(rowB); S.cfg.refReward = d.r != null ? +d.r : 50; S.cps = d.k || []; }
 const dirtyN = () => S.dirtyP.size + (S.dirtyB ? 1 : 0) + (S.dirtyR ? 1 : 0);
 async function loadCatalog() {
   if (!sb) { if (!loaded) { loadErr = "The shop is not connected. Add SB_URL and SB_KEY in index.html."; render(); } return; }
   if (dirtyN()) return; // never overwrite unsaved admin edits
   try {
-    const [c, p, b, s] = await Promise.all([sb.from("categories").select("*").order("sort_order"),
+    const [c, p, b, s, k] = await Promise.all([sb.from("categories").select("*").order("sort_order"),
       sb.from("products").select("*").order("sort_order").order("created_at"), sb.from("banners").select("*").order("sort_order"),
-      sb.from("settings").select("value").eq("key", "cfg").maybeSingle()]);
+      sb.from("settings").select("value").eq("key", "cfg").maybeSingle(), sb.from("coupons").select("code,kind,value,min_order,ends_at").eq("public", true).eq("active", true).gt("ends_at", new Date().toISOString())]);
     const e = c.error || p.error || b.error; if (e) throw e;
-    const d = {c:c.data, p:p.data, b:b.data, r:s.data && s.data.value ? s.data.value.refReward : null}, sig = JSON.stringify(d);
+    const d = {c:c.data, p:p.data, b:b.data, r:s.data && s.data.value ? s.data.value.refReward : null, k:k.data || []}, sig = JSON.stringify(d);
     loadErr = ""; if (loaded && sig === lastSig) return; lastSig = sig; applyCatalog(d); loaded = true; LS("sk_cat", d);
   } catch (e) { if (!loaded) loadErr = /does not exist|schema cache/i.test(e.message || "") ? "The shop tables are missing. Run supabase.sql in your Supabase SQL Editor." : (e.message || "Could not load the shop."); }
   render(); }
@@ -160,6 +160,21 @@ async function saveAll() {
 const cached = LS("sk_cat"); if (cached && cached.p) { applyCatalog(cached); loaded = true; lastSig = JSON.stringify(cached); } // instant start, refreshed from Supabase below
 const loadView = () => loadErr ? `<div class="box"><b>Can’t load the shop</b><p class="mu">${esc(loadErr)}</p><button class="pri" data-a="retry">Try again</button></div>`
   : `<div class="car"><div class="slide sk" style="min-height:130px"></div></div><div class="grid" style="margin-top:14px">${'<div class="card sk" style="height:215px"></div>'.repeat(6)}</div>`;
+
+// ===== Admin data, coupons, countdowns =====
+const ocs = o => S.ocost[o.uid + "|" + o.id] ?? o.items.reduce((a, i) => a + i.qty * (S.costs[i.pid] || 0), 0); // order cost: snapshot, else current buying prices
+async function loadAdmin() { if (!sb || !S.user) return; const r = await sb.rpc("is_admin"); S.isA = r.data === true;
+  if (S.isA) { const [c, o, k] = await Promise.all([sb.from("product_costs").select("*"), sb.from("order_costs").select("*"), sb.from("coupons").select("*").order("ends_at", {ascending:false})]);
+    S.costs = {}; (c.data || []).forEach(x => S.costs[x.pid] = x.cost); S.ocost = {}; (o.data || []).forEach(x => S.ocost[x.user_id + "|" + x.order_no] = x.cost); S.coupons = k.data || []; S.team = ((await sb.from("admins").select("phone")).data || []).map(x => x.phone); }
+  render(); }
+async function sv(p, ok) { const r = await p; if (r && r.error) return toast(/foreign key/i.test(r.error.message) ? "Move or delete its products first" : r.error.message); S.ep = null; lastSig = ""; await loadCatalog(); await loadAdmin(); toast(ok); }
+const cpTxt = c => (c.kind === "percent" ? c.value + "% off" : R(c.value) + " off") + (c.min_order ? " over " + R(c.min_order) : "");
+const cpStrip = () => { const L = S.cps.filter(c => new Date(c.ends_at) > Date.now()); return L.length ? `<h2>Coupons</h2><div class="strip">${L.map(c => `<div class="box" style="flex:0 0 190px;margin:0"><b>${esc(c.code)}</b><div class="mu">${cpTxt(c)}</div><div class="mu">Ends in <b data-end="${c.ends_at}"></b></div><button class="sec" data-a="usec" data-x="${esc(c.code)}" style="margin-top:6px">Use code</button></div>`).join("")}</div>` : ""; };
+async function useCoupon(k) { S.coupon = k.toUpperCase(); S.cp = null; if (!sb || !k) { S.coupon = ""; return; } const r = await sb.rpc("check_coupon", {p_code:S.coupon}); S.cp = r.data && r.data[0] || null; if (!S.cp) S.coupon = ""; }
+const cpDisc = pt => { const c = S.cp; if (!c || c.code !== S.coupon || pt < c.min_order) return 0; return Math.min(pt, c.kind === "percent" ? Math.round(pt * c.value / 100) : c.value); };
+const tick = () => document.querySelectorAll("[data-end]").forEach(e => { const t = Math.floor((new Date(e.dataset.end) - Date.now()) / 1000);
+  e.textContent = t <= 0 ? "Expired" : (t >= 86400 ? Math.floor(t / 86400) + "d " : "") + [Math.floor(t / 3600) % 24, Math.floor(t / 60) % 60, t % 60].map(n => String(n).padStart(2, "0")).join(":"); });
+setInterval(tick, 1000);
 
 // ===== Recommendation engine (on-device) =====
 // Learns from what you view (1), add to cart (3) and buy (5). Scores every product by: same category as your interests,
@@ -182,13 +197,13 @@ function loadCO(ids) { if (!sb || !ids.length) return; sb.rpc("also_bought", {pi
 // ===== Orders =====
 // One order per checkout, sold by Sokio. Delivery KSh 120 (up to 2 items) or 200; free from FREE. COD adds a fee.
 function placeOrder(items, pay, post, addr) {
-  const pt = items.reduce((a, i) => a + i.bp * i.qty, 0), u = items.reduce((a, i) => a + i.qty, 0), ship = u > 2 ? 200 : 120, free = pt >= FREE, cod = pay === "COD" ? COD : 0;
+  const pt = items.reduce((a, i) => a + i.bp * i.qty, 0), u = items.reduce((a, i) => a + i.qty, 0), ship = u > 2 ? 200 : 120, cd = cpDisc(pt), free = pt - cd >= FREE, cod = pay === "COD" ? COD : 0;
   const o = {id:(sb && S.uid ? S.uid.slice(0, 3) + "-" : "") + (S.nid++), buyerId:S.user, uid:S.uid, items:items.map(i => ({...i})), productTotal:pt, shippingFee:ship, free, codFee:cod,
-    total:pt + (free ? 0 : ship) + cod, paymentMode:pay, postcode:post, address:addr, status:"placed", settled:false, rated:0};
-  items.forEach(i => { const p = pr(i.pid); if (p) p.stock = Math.max(0, p.stock - i.qty); addHist(i.pid, 5); }); S.orders.push(o); sync(o); loadCO(items.map(i => i.pid)); return o; }
+    total:pt - cd + (free ? 0 : ship) + cod, discount:cd, coupon:cd ? S.coupon : "", buyerName:(ACC[S.user] || {}).name || "", paymentMode:pay, postcode:post, address:addr, status:"placed", settled:false, rated:0};
+  items.forEach(i => { const p = pr(i.pid); if (p) p.stock = Math.max(0, p.stock - i.qty); addHist(i.pid, 5); }); S.orders.push(o); S.coupon = ""; S.cp = null; sync(o); loadCO(items.map(i => i.pid)); return o; }
 const restock = o => o.items.forEach(i => { const p = pr(i.pid); if (p) p.stock += i.qty; }); // the database does the same in orders_guard()
-function sync(o) { if (!sb || !S.uid || !o || (o.buyerId !== S.user && !isAdm())) return; o.saved = 1;
-  sb.from("orders").upsert({user_id:o.uid || S.uid, order_no:o.id, data:o}, {onConflict:"user_id,order_no"}).then(r => { if (!r.error) return loadCatalog(); const gone = /out of stock/i.test(r.error.message || ""); toast(gone ? "Sorry, an item just sold out. Order not placed." : "Could not save order");
+function sync(o) { if (!sb || !S.uid || !o || (o.buyerId !== S.user && !isAdm())) return; const nw = !o.saved; o.saved = 1;
+  sb.from("orders").upsert({user_id:o.uid || S.uid, order_no:o.id, data:o}, {onConflict:"user_id,order_no"}).then(r => { if (!r.error) { if (nw) loadOrders().then(render); return loadCatalog(); } const m = r.error.message || "", gone = /out of stock|coupon|duplicate|bad order/i.test(m); toast(/coupon|duplicate/i.test(m) ? "That coupon is not valid or was already used. Order not placed." : gone ? "Sorry, an item just sold out. Order not placed." : "Could not save order");
     if (gone) { S.orders = S.orders.filter(q => q !== o); S.cart = []; lastSig = ""; loadCatalog(); } render(); }); }
 async function loadOrders() { const r = await sb.from("orders").select("data").order("created_at"); S.orders = (r.data || []).map(x => x.data);
   S.nid = Math.max(1001, ...S.orders.filter(o => o.buyerId === S.user).map(o => (+String(o.id).split("-").pop() + 1) || 0));
@@ -201,7 +216,7 @@ async function doAuth(m, pn) { const nw = S.mode === "new", n = nw ? $("#an").va
     if (error) return toast(nw ? error.message : "Mobile number or PIN is incorrect"); if (!data.session) return toast("Turn off Confirm email in Supabase Auth settings");
     ACC[m] = {name:data.user.user_metadata.name || n}; S.prof = data.user.user_metadata.prof || null; S.uid = data.user.id;
     const rf = LS("bz_ref"); if (nw && rf && !S.uid.startsWith(rf)) { await sb.from("referrals").insert({code:rf}); LS("bz_ref", null); }
-    S.user = m; await loadOrders(); }
+    S.user = m; await loadOrders(); await loadAdmin(); }
   else { if (nw) { if (ACC[m]) return toast("Account exists. Sign in instead"); ACC[m] = {name:n, pin:pn, ref:LS("bz_ref") || ""}; LS("bz_acc", ACC); } else if (!ACC[m] || ACC[m].pin !== pn) return toast("Mobile number or PIN is incorrect"); S.prof = ACC[m].prof || null; }
   S.user = m; LS("bz_user", m); S.view = S.back || "home"; S.back = null; toast("Welcome, " + ACC[m].name); render(); }
 const myCode = () => S.uid ? S.uid.slice(0, 8) : String(S.user).slice(-6);
@@ -217,7 +232,7 @@ function filt() { return P.filter(p => !p.hidden && (S.cat === "All" || (S.cat =
 function carousel() { const B = S.banners; if (!B.length) return "";
   return `<div class="car" id="car">${B.map(b => { const u = safeUrl(b.img || ""); return `<button class="slide c${(b.c || 0) % 4}" data-a="cat" data-x="${esc(b.cat || "All")}"${u ? ` style="background-image:url('${u}')"` : ""}><b>${esc(b.t)}</b><span>${esc(b.s)}</span></button>`; }).join("")}</div><div class="dots">${B.map((_, i) => `<i class="${i ? "" : "on"}"></i>`).join("")}</div>`; }
 function home() { if (!loaded) return loadView(); const res = S.q || S.cat !== "All", cats = [["All","🛍️"], ...Object.entries(CATS).map(([k, v]) => [k, v[1]]), ["Promo","🔥"]];
-  let h = (res ? "" : carousel()) + `<div class="cats">${cats.map(([k, e]) => `<button class="ct" aria-pressed="${S.cat === k}" data-a="cat" data-x="${k}"><span>${e}</span>${k.replace(" wear", "")}</button>`).join("")}</div>`;
+  let h = (res ? "" : carousel() + cpStrip()) + `<div class="cats">${cats.map(([k, e]) => `<button class="ct" aria-pressed="${S.cat === k}" data-a="cat" data-x="${k}"><span>${e}</span>${k.replace(" wear", "")}</button>`).join("")}</div>`;
   if (!res) { const pm = P.filter(p => p.disc > 0 && !p.hidden && p.stock > 0);
     if (pm.length) h += `<h2>Promo today <button class="lk" data-a="cat" data-x="Promo">See all</button></h2><div class="strip">${pm.map(card).join("")}</div>`;
     h += `<h2>${S.hist.length || S.orders.length ? "Recommended for you" : "Popular right now"}</h2><div class="strip">${recs().map(card).join("")}</div><h2>All products</h2>`; }
@@ -235,15 +250,17 @@ function cart() { if (!S.cart.length) return '<p class="mu pad">Your cart is emp
   + `<div class="box"><div class="kv"><span>Subtotal</span><b>${R(t)}</b></div><div class="mu">${t >= FREE ? "Free delivery" : "Delivery from " + R(120) + ". Free from " + R(FREE)}</div></div><div class="pad"><button class="pri" data-a="chk" style="width:100%">Checkout</button></div>
   <h2>You may also like</h2><div class="strip">${recs(S.cart.map(i => i.pid), 6).map(card).join("")}</div>`; }
 function checkout() { if (!S.cart.length) return cart(); if (!S.user) return '<div class="box">Sign in with your mobile number to place your order.</div><div class="pad"><button class="pri" data-a="login">Sign in or create account</button></div>';
-  const f = S.prof || {}, pt = S.cart.reduce((a, i) => a + i.bp * i.qty, 0), u = S.cart.reduce((a, i) => a + i.qty, 0), sh = pt >= FREE ? 0 : (u > 2 ? 200 : 120), po = f.post || "";
+  const f = S.prof || {}, pt = S.cart.reduce((a, i) => a + i.bp * i.qty, 0), u = S.cart.reduce((a, i) => a + i.qty, 0), cd = cpDisc(pt), sh = pt - cd >= FREE ? 0 : (u > 2 ? 200 : 120), po = f.post || "";
   return `<div class="box"><p><label>Delivery address<br><input type="text" id="ca" value="${esc(f.addr || "")}" style="width:100%" autocomplete="street-address"></label></p><p><label>Postcode (5 digits)<br><input type="text" id="cp" value="${esc(po)}" inputmode="numeric" maxlength="5" style="width:110px"></label>${svc(po) ? ` <span class="ok">Delivers in ${eta(po)}</span>` : ""}</p></div>
   <div class="box"><label><input type="radio" name="pay" value="COD" ${(f.pay || "COD") === "COD" ? "checked" : ""}> Cash on delivery (+${R(COD)})</label><br><label><input type="radio" name="pay" value="MPESA" ${f.pay === "MPESA" ? "checked" : ""}> M-Pesa (demo, no payment taken)</label><p><label class="mu"><input type="checkbox" id="cs" checked> Save these details for 1-tap buying</label></p></div>
-  <div class="box"><div class="kv"><span>Items</span><span>${R(pt)}</span></div><div class="kv"><span>Delivery</span><span>${sh ? R(sh) : "Free"}</span></div></div><div class="pad"><button class="pri" data-a="place" style="width:100%">Place order</button></div>`; }
+  <div class="box"><div class="row" style="margin:0"><input type="text" id="cc" placeholder="Coupon code" value="${esc(S.coupon || "")}" style="flex:1;text-transform:uppercase"><button class="sec" data-a="applyc">Apply</button></div>${S.cp ? `<div class="mu">${esc(S.cp.code)}: ${cpTxt(S.cp)} · ends in <b data-end="${S.cp.ends_at}"></b></div>` : ""}</div>
+  <div class="box"><div class="kv"><span>Items</span><span>${R(pt)}</span></div>${cd ? `<div class="kv ok"><span>Coupon ${esc(S.cp.code)}</span><span>−${R(cd)}</span></div>` : ""}<div class="kv"><span>Delivery</span><span>${sh ? R(sh) : "Free"}</span></div></div><div class="pad"><button class="pri" data-a="place" style="width:100%">Place order</button></div>`; }
+const buyer = o => { const d = String(o.buyerId).replace(/\D/g, ""); return `<div class="kv"><span><b>${esc(o.buyerName || "Customer")}</b> · +${d}</span><span class="row" style="margin:0"><a class="sec" href="tel:+${d}">Call</a><a class="sec" href="https://wa.me/${d}" target="_blank" rel="noopener">WhatsApp</a></span></div><div class="mu">Profit ${R(o.productTotal - (o.discount || 0) - ocs(o))}</div>`; };
 function oc(o, m) { const i = FLOW.indexOf(o.status), b = [];
   if (m === "buyer") { if (o.status === "placed") b.push(["cancel", "Cancel order"]); if (o.status === "delivered" && !o.settled) b.push(["ret", "Return"]); }
   else { if (i >= 0 && i < 5) b.push(["adv", i === 0 ? "Pack order" : "Advance"]); if (i === 4) b.push(["rto", "Failed delivery"]); if (o.status === "delivered" && !o.settled) b.push(["settle", "Close return window"]); }
-  return `<div class="box"><div class="kv"><b>#${o.id}</b><span class="st ${o.status}">${o.status.replace(/_/g, " ")}</span></div><div class="mu">${o.items.map(x => `${esc(pr(x.pid) ? pr(x.pid).title : x.pid)} ${x.size}×${x.qty}`).join(", ")}</div>
-  <div class="step">${FLOW.map((_, k) => `<i class="${k <= i ? "on" : ""}"></i>`).join("")}</div><div class="mu">${o.paymentMode} · total ${R(o.total)}${m === "admin" ? " · +" + String(o.buyerId) : ""} · to ${esc(o.address || "")} ${esc(o.postcode || "")}</div>
+  return `<div class="box"><div class="kv"><b>#${o.id}</b><span class="st ${o.status}">${o.status.replace(/_/g, " ")}</span></div>${m === "admin" ? buyer(o) : ""}<div class="mu">${o.items.map(x => `${esc(x.title || (pr(x.pid) || {}).title || x.pid)} ${x.size}×${x.qty}`).join(", ")}</div>
+  <div class="step">${FLOW.map((_, k) => `<i class="${k <= i ? "on" : ""}"></i>`).join("")}</div><div class="mu">${o.paymentMode} · total ${R(o.total)}${o.coupon ? " · coupon " + esc(o.coupon) + " −" + R(o.discount || 0) : ""} · to ${esc(o.address || "")} ${esc(o.postcode || "")}</div>
   <div class="row">${b.map(([a, l]) => `<button class="sec ${a === "rto" || a === "cancel" ? "d" : ""}" data-a="${a}" data-x="${o.id}">${l}</button>`).join("")}${m === "buyer" && o.status === "delivered" && !o.rated ? `<select data-c="rate" data-x="${o.id}" aria-label="Rate"><option value="">Rate</option>${[5, 4, 3, 2, 1].map(n => `<option>${n}</option>`).join("")}</select>` : ""}${o.rated ? `<span class="mu">You rated ${o.rated}★</span>` : ""}</div></div>`; }
 function orders() { if (!S.user) return '<div class="pad"><p class="mu">Sign in to see your orders.</p><button class="pri" data-a="login">Sign in</button></div>'; const m = S.orders.filter(o => o.buyerId === S.user); return m.length ? [...m].reverse().map(o => oc(o, "buyer")).join("") : '<p class="mu pad">No orders yet.</p>'; }
 function account() { const f = S.prof || {};
@@ -256,25 +273,49 @@ function account() { const f = S.prof || {};
   ${c ? '<p><label>Name<br><input type="text" id="an" autocomplete="name"></label></p>' : ""}<p><label>Mobile number<br><input type="text" id="am" inputmode="tel" placeholder="07XX XXX XXX" autocomplete="tel"></label></p>
   <p><label>6-digit PIN<br><input type="password" id="ap" inputmode="numeric" maxlength="6" autocomplete="${c ? "new-password" : "current-password"}"></label></p><button class="pri" data-a="auth">${c ? "Create account" : "Sign in"}</button><p class="mu">No code or SMS needed. Choose a 6-digit PIN you will remember.</p></div>`; }
 function admin() { if (!isAdm()) return '<p class="mu pad">Admin only. Sign in with an admin mobile number and this tab opens.</p>';
+  const T = ["Overview", "Orders", "Products", "Categories", "Coupons", "Banners", "Team"], t = S.at || "Overview";
+  return `<div class="chips" style="flex-wrap:nowrap;overflow-x:auto">${T.map(n => `<button class="sec" ${n === t ? 'style="border-color:var(--ac);color:var(--ac)"' : ""} data-a="atab" data-x="${n}">${n}</button>`).join("")}</div>` + ({Overview:aOv, Orders:aOr, Products:aPr, Categories:aCa, Coupons:aCo, Banners:aBa, Team:aTe}[t] || aOv)(); }
+function aOv() { if (!isAdm()) return '<p class="mu pad">Admin only. Sign in with an admin mobile number and this tab opens.</p>';
   const os = S.orders, live = os.filter(o => !["rto", "returned", "cancelled"].includes(o.status)), g = live.reduce((a, o) => a + o.productTotal, 0), cnt = {}, un = {}, ct = {}, rc = {};
   os.forEach(o => cnt[o.status] = (cnt[o.status] || 0) + 1); live.forEach(o => o.items.forEach(i => { const p = pr(i.pid); if (!p) return; un[p.title] = (un[p.title] || 0) + i.qty; ct[p.category] = (ct[p.category] || 0) + i.bp * i.qty; }));
   S.rf.forEach(x => rc[x.code] = (rc[x.code] || 0) + 1); const st = os.filter(o => o.settled), B = S.banners;
-  return `<div class="stats"><div><span class="mu">Orders</span><b>${os.length}</b></div><div><span class="mu">GMV</span><b>${R(g)}</b></div><div><span class="mu">Settled sales</span><b>${R(st.reduce((a, o) => a + o.productTotal, 0))}</b></div><div><span class="mu">Customers</span><b>${new Set(os.map(o => o.buyerId)).size}</b></div><div><span class="mu">Avg order</span><b>${R(live.length ? g / live.length : 0)}</b></div><div><span class="mu">Return rate</span><b>${os.length ? Math.round(os.filter(o => o.status === "returned").length / os.length * 100) : 0}%</b></div></div>
-  <h2>Analytics</h2><div class="box"><b>Orders by status</b>${bars(cnt)}</div><div class="box"><b>Top products (units)</b>${bars(un)}</div><div class="box"><b>Sales by category</b>${bars(ct, R)}</div><div class="box"><b>Referrals: ${S.rf.length} signups</b>${bars(rc)}</div>
-  <h2>Banners</h2>${B.map((b, k) => `<div class="box"><input type="text" placeholder="Title" value="${esc(b.t)}" data-c="bf" data-x="${k}" data-f="t" style="width:100%"><p><input type="text" placeholder="Subtitle" value="${esc(b.s)}" data-c="bf" data-x="${k}" data-f="s" style="width:100%"></p><p><input type="text" placeholder="Image URL (https, optional)" value="${esc(b.img || "")}" data-c="bf" data-x="${k}" data-f="img" style="width:100%"></p>
+    const rev = live.reduce((a, o) => a + o.productTotal - (o.discount || 0), 0), pf = rev - live.reduce((a, o) => a + ocs(o), 0), cu = {}; live.forEach(o => { const k = (o.buyerName || "Customer") + " +" + o.buyerId; cu[k] = (cu[k] || 0) + o.productTotal - (o.discount || 0); });
+  return `<div class="stats"><div><span class="mu">Orders</span><b>${os.length}</b></div><div><span class="mu">GMV</span><b>${R(g)}</b></div><div><span class="mu">Settled sales</span><b>${R(st.reduce((a, o) => a + o.productTotal, 0))}</b></div><div><span class="mu">Customers</span><b>${new Set(os.map(o => o.buyerId)).size}</b></div><div><span class="mu">Avg order</span><b>${R(live.length ? g / live.length : 0)}</b></div><div><span class="mu">Return rate</span><b>${os.length ? Math.round(os.filter(o => o.status === "returned").length / os.length * 100) : 0}%</b></div><div><span class="mu">Revenue</span><b>${R(rev)}</b></div><div><span class="mu">Profit</span><b>${R(pf)}</b></div><div><span class="mu">Margin</span><b>${rev ? Math.round(pf / rev * 100) : 0}%</b></div></div>
+  <h2>Analytics</h2><div class="box"><b>Profit by product</b>${bars(Object.fromEntries(P.map(p => [p.title, (un[p.title] || 0) * (sale(p) - (S.costs[p.id] || 0))])), R)}</div><div class="box"><b>Top customers</b>${bars(cu, R)}</div><div class="box"><b>Low stock (under 10)</b>${bars(Object.fromEntries(P.filter(p => p.stock < 10).map(p => [p.title, p.stock])))}</div><div class="box"><b>Orders by status</b>${bars(cnt)}</div><div class="box"><b>Top products (units)</b>${bars(un)}</div><div class="box"><b>Sales by category</b>${bars(ct, R)}</div><div class="box"><b>Referrals: ${S.rf.length} signups</b>${bars(rc)}</div>
+  `; }
+function aBa() { if (!isAdm()) return '<p class="mu pad">Admin only. Sign in with an admin mobile number and this tab opens.</p>';
+  const os = S.orders, live = os.filter(o => !["rto", "returned", "cancelled"].includes(o.status)), g = live.reduce((a, o) => a + o.productTotal, 0), cnt = {}, un = {}, ct = {}, rc = {};
+  os.forEach(o => cnt[o.status] = (cnt[o.status] || 0) + 1); live.forEach(o => o.items.forEach(i => { const p = pr(i.pid); if (!p) return; un[p.title] = (un[p.title] || 0) + i.qty; ct[p.category] = (ct[p.category] || 0) + i.bp * i.qty; }));
+  S.rf.forEach(x => rc[x.code] = (rc[x.code] || 0) + 1); const st = os.filter(o => o.settled), B = S.banners;
+  return `<h2>Banners</h2>${B.map((b, k) => `<div class="box"><input type="text" placeholder="Title" value="${esc(b.t)}" data-c="bf" data-x="${k}" data-f="t" style="width:100%"><p><input type="text" placeholder="Subtitle" value="${esc(b.s)}" data-c="bf" data-x="${k}" data-f="s" style="width:100%"></p><p><input type="text" placeholder="Image URL (https, optional)" value="${esc(b.img || "")}" data-c="bf" data-x="${k}" data-f="img" style="width:100%"></p>
   <div class="row"><select data-c="bf" data-x="${k}" data-f="cat" aria-label="Opens">${["All", ...Object.keys(CATS), "Promo"].map(c => `<option ${b.cat === c ? "selected" : ""}>${c}</option>`).join("")}</select><select data-c="bf" data-x="${k}" data-f="c" aria-label="Colour">${["Berry", "Green", "Blue", "Amber"].map((n, c) => `<option value="${c}" ${(b.c || 0) === c ? "selected" : ""}>${n}</option>`).join("")}</select><button class="sec d" data-a="delb" data-x="${k}">Remove</button></div></div>`).join("")}<div class="pad"><button class="sec" data-a="addb">Add banner</button></div>
   <h2>Refer and earn</h2><div class="box"><label>Reward per friend KSh <input type="number" min="0" value="${S.cfg.refReward}" data-c="rr" style="width:90px"></label></div>
-  <h2>Products</h2>${P.map(p => `<div class="box"><div class="kv"><b>${p.image} ${esc(p.title)}</b><label class="mu"><input type="checkbox" data-c="pf" data-x="${p.id}" data-f="hidden" ${p.hidden ? "checked" : ""}> Hide</label></div>
-  <div class="row mini">Price <input type="number" min="1" value="${p.price}" data-c="pf" data-x="${p.id}" data-f="price"> Stock <input type="number" min="0" value="${p.stock}" data-c="pf" data-x="${p.id}" data-f="stock"> Promo % <input type="number" min="0" max="50" value="${p.disc}" data-c="pf" data-x="${p.id}" data-f="disc"></div><input type="text" placeholder="Image URL (https)" value="${esc(p.img || "")}" data-c="pf" data-x="${p.id}" data-f="img" style="width:100%"></div>`).join("")}
-  <h2>Add product</h2><div class="box"><div class="row"><input type="text" id="nt" placeholder="Title" aria-label="Title" style="flex:1 1 140px"><select id="nc" aria-label="Category">${Object.keys(CATS).map(c => `<option>${c}</option>`).join("")}</select></div><div class="row mini"><input type="number" id="np" placeholder="Price" min="1"><input type="number" id="ns" placeholder="Stock" min="1"><input type="text" id="ne" placeholder="Emoji" maxlength="2"></div><input type="text" id="ni" placeholder="Image URL (https)" style="width:100%"><p><button class="sec" data-a="addp">Add product</button></p></div>
-  <div class="pad"><button class="pri" data-a="save" style="width:100%">Save changes${dirtyN() ? " (" + dirtyN() + ")" : ""}</button></div><h2>Orders</h2>${os.length ? [...os].reverse().map(o => oc(o, "admin")).join("") : '<p class="mu pad">No orders yet.</p>'}`; }
+  <div class="pad"><button class="pri" data-a="save" style="width:100%">Save changes${dirtyN() ? " (" + dirtyN() + ")" : ""}</button></div>`; }
+function aOr() { const q = (S.oq || "").toLowerCase(), L = [...S.orders].reverse().filter(o => (o.id + o.buyerId + (o.buyerName || "") + o.status).toLowerCase().includes(q));
+  return `<div class="pad"><input type="search" placeholder="Search name, phone, order #, status" value="${esc(S.oq || "")}" data-c="oq" style="width:100%"></div>` + (L.map(o => oc(o, "admin")).join("") || '<p class="mu pad">No orders.</p>'); }
+const prow = p => { const c = S.costs[p.id] || 0, m = Math.round((sale(p) - c) / sale(p) * 100); return `<div class="box kv"><span>${p.image} <b>${esc(p.title)}</b>${p.hidden ? ' <span class="mu">(hidden)</span>' : ""}<br><span class="mu">${esc(p.category)} · Sell ${R(sale(p))} · Buy ${R(c)} · <span class="${m >= 0 ? "ok" : "bad"}">${m}% margin</span></span><br><span class="${p.stock < 10 ? "bad" : "mu"}">${p.stock} in stock</span></span><button class="sec" data-a="pedit" data-x="${p.id}">Edit</button></div>`; };
+const pform = p => { const id = p.id || "new"; return `<div class="box"><b>${p.id ? "Edit product" : "New product"}</b><p><input type="text" id="e_t" placeholder="Title" value="${esc(p.title || "")}" style="width:100%"></p>
+  <div class="row"><select id="e_c" aria-label="Category">${Object.keys(CATS).map(c => `<option ${p.category === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select><input type="text" id="e_e" placeholder="Emoji" maxlength="2" value="${esc(p.image || "")}" style="width:70px"></div>
+  <div class="row mini">Selling <input type="number" id="e_p" min="1" value="${p.price || ""}"> Buying <input type="number" id="e_b" min="0" value="${S.costs[p.id] ?? ""}"> Stock <input type="number" id="e_s" min="0" value="${p.stock ?? ""}"> Promo % <input type="number" id="e_d" min="0" max="50" value="${p.disc || 0}"></div>
+  <p><input type="text" id="e_z" placeholder="Sizes, comma separated" value="${esc((p.sizes || ["Standard"]).join(", "))}" style="width:100%"></p><p><input type="text" id="e_i" placeholder="Image URL (https)" value="${esc(p.img || "")}" style="width:100%"></p>
+  <label class="mu"><input type="checkbox" id="e_h" ${p.hidden ? "checked" : ""}> Hidden from shop</label><div class="row"><button class="pri" data-a="psave" data-x="${id}">Save</button><button class="sec" data-a="pedit" data-x="">Cancel</button>${p.id ? `<button class="sec d" data-a="pdel" data-x="${id}">Delete</button>` : ""}</div></div>`; };
+function aPr() { const q = (S.pq || "").toLowerCase();
+  return `<div class="row" style="margin:8px 12px"><input type="search" placeholder="Search products" value="${esc(S.pq || "")}" data-c="pq" style="flex:1"><button class="pri" data-a="pedit" data-x="new">+ Add</button></div>${S.ep === "new" ? pform({}) : ""}` + P.filter(p => (p.title + p.category).toLowerCase().includes(q)).map(p => S.ep === p.id ? pform(p) : prow(p)).join(""); }
+function aTe() { const T = S.team || [];
+  return `<div class="box"><b>Admin numbers</b><p class="mu">Anyone signed in with these mobile numbers gets this Admin tab.</p>${T.map(n => `<div class="kv"><span>+${n}${n === S.user ? ' <span class="mu">(you)</span>' : ""}</span>${n === S.user ? "" : `<button class="sec d" data-a="tdel" data-x="${n}">Remove</button>`}</div>`).join("")}
+  <div class="row"><input type="tel" id="tn" placeholder="2547XXXXXXXX" inputmode="numeric" style="flex:1"><button class="pri" data-a="tadd">Add admin</button></div></div>`; }
+function aCa() { return Object.entries(CATS).map(([n, [c, e]]) => `<div class="box kv"><span><input type="text" value="${esc(e)}" maxlength="2" data-c="cat" data-x="${esc(n)}" data-f="emoji" style="width:52px"> <b>${esc(n)}</b> <span class="mu">${P.filter(p => p.category === n).length} products</span></span><span class="row" style="margin:0"><input type="color" value="${c}" data-c="cat" data-x="${esc(n)}" data-f="color" aria-label="Colour"><button class="sec d" data-a="cdel" data-x="${esc(n)}">Delete</button></span></div>`).join("")
+  + `<div class="box"><b>Add category</b><div class="row"><input type="text" id="cn" placeholder="Name" style="flex:1 1 120px"><input type="text" id="ce" placeholder="Emoji" maxlength="2" style="width:70px"><input type="color" id="cl" value="#e6efd9" aria-label="Colour"><button class="pri" data-a="cadd">Add</button></div></div>`; }
+function aCo() { return `<div class="box"><b>New coupon</b><div class="row"><input type="text" id="k_c" placeholder="CODE" style="width:110px;text-transform:uppercase"><select id="k_k"><option value="percent">% off</option><option value="fixed">KSh off</option></select><input type="number" id="k_v" placeholder="Value" min="1" style="width:80px"></div>
+  <div class="row mini">Min order <input type="number" id="k_m" min="0" placeholder="0"> Max uses <input type="number" id="k_u" min="1" placeholder="any"> Hours <input type="number" id="k_h" min="1" value="24"></div><label class="mu"><input type="checkbox" id="k_p" checked> Show on home screen</label><p><button class="pri" data-a="kadd">Create coupon</button></p></div>`
+  + (S.coupons.map(c => `<div class="box"><div class="kv"><b>${esc(c.code)}</b><span class="mu">${cpTxt(c)}</span></div><div class="mu">Used ${c.uses}${c.max_uses ? "/" + c.max_uses : ""} · ${c.public ? "Public" : "Private"} · ${c.active ? "" : "Paused · "}<b data-end="${c.ends_at}"></b></div><div class="row"><button class="sec" data-a="ctog" data-x="${esc(c.code)}">${c.active ? "Pause" : "Resume"}</button><button class="sec d" data-a="codel" data-x="${esc(c.code)}">Delete</button></div></div>`).join("") || '<p class="mu pad">No coupons yet.</p>'); }
 
 function render() { const v = S.view, tabs = v !== "product" && v !== "checkout", n = S.cart.reduce((a, i) => a + i.qty, 0);
   const titles = {product:"Product", checkout:"Checkout", cart:"Cart", orders:"My orders", account:S.user ? "Account" : "Sign in", admin:"Admin"};
   const top = v === "home" ? `<div class="top"><div class="hrow"><button class="logo" data-a="go" data-x="home" aria-label="Sokio home">${LOGO}</button><label class="sbar">${ic("search")}<input type="search" id="q" placeholder="Search Sokio" value="${esc(S.q)}" aria-label="Search"></label><button class="ib" data-a="go" data-x="cart" aria-label="Cart">${ic("cart")}${n ? `<span class="bd">${n}</span>` : ""}</button></div></div>`
     : `<div class="top"><div class="hrow">${v === "product" || v === "checkout" ? `<button class="ib" data-a="back" aria-label="Back">${ic("back")}</button>` : ""}<b class="ttl">${titles[v] || ""}</b></div></div>`;
   const nav = tabs ? `<nav class="nav" aria-label="Main">${[["home", "Home", "home"], ["cart", "Cart" + (n ? ` (${n})` : ""), "cart"], ["orders", "Orders", "orders"], ["account", S.user ? "Account" : "Sign in", "user"], ...(isAdm() ? [["admin", "Admin", "admin"]] : [])].map(([k, l, i]) => `<button data-a="go" data-x="${k}" ${v === k ? 'aria-current="true"' : ""}>${ic(i)}${l}</button>`).join("")}</nav>` : "";
-  $("#app").innerHTML = top + ({home, product:prod, cart, checkout, orders, account, admin}[v] || home)() + nav; }
+  $("#app").innerHTML = top + ({home, product:prod, cart, checkout, orders, account, admin}[v] || home)() + nav; tick(); }
 
 // ===== Events =====
 const bail = m => { toast(m); render(); };
@@ -300,7 +341,7 @@ document.addEventListener("click", e => { const b = e.target.closest("[data-a]")
   else if (a === "setup") { const ad = $("#fa").value.trim(), po = $("#fp").value.trim(); if (!ad || !svc(po)) return toast("Enter an address and a valid 5-digit postcode"); saveProf({addr:ad, post:po, pay:$("#fy").value}); toast("1-tap details saved"); }
   else if (a === "mode") S.mode = x;
   else if (a === "auth") { const m = nm($("#am").value), pn = $("#ap").value; if (!m) return toast("Enter a valid Kenyan mobile number"); if (!/^\d{6}$/.test(pn)) return toast("PIN must be 6 digits"); return doAuth(m, pn); }
-  else if (a === "logout") { S.user = null; LS("bz_user", null); S.prof = null; if (sb) { sb.auth.signOut(); S.orders = []; S.uid = null; } if (S.view === "admin") S.view = "home"; toast("Signed out"); }
+  else if (a === "logout") { S.user = null; LS("bz_user", null); S.prof = null; S.isA = false; if (sb) { sb.auth.signOut(); S.orders = []; S.uid = null; } if (S.view === "admin") S.view = "home"; toast("Signed out"); }
   else if (a === "copyref") { const u = location.href.split("#")[0] + "#join-" + myCode(); try { navigator.clipboard.writeText(u).then(() => toast("Invite link copied"), () => toast(u)); } catch (_) { toast(u); } }
   else if (a === "cancel") { o.status = "cancelled"; restock(o); toast("Order cancelled"); }
   else if (a === "adv") { const i = FLOW.indexOf(o.status); if (i >= 0 && i < 5) o.status = FLOW[i + 1]; }
@@ -312,11 +353,30 @@ document.addEventListener("click", e => { const b = e.target.closest("[data-a]")
   else if (a === "addp") { const t = $("#nt").value.trim(), p = +$("#np").value, s = +$("#ns").value; if (!t || !(p > 0) || !(s > 0)) return toast("Add a title, price and stock"); const c = $("#nc").value;
     const np = {id:"p" + Date.now().toString(36), title:t, category:c, image:$("#ne").value || "📦", img:safeUrl($("#ni").value.trim()), price:Math.round(p), stock:Math.round(s), sizes:c.includes("wear") ? ["S", "M", "L", "XL"] : ["Standard"], rating:0, rc:0, disc:0, hidden:false, sort:Math.max(0, ...P.map(q => q.sort || 0)) + 1};
     P.push(np); S.dirtyP.add(np.id); toast("Product added. Save changes to publish it."); }
+  else if (a === "atab") { S.at = x; S.ep = null; window.scrollTo(0, 0); }
+  else if (a === "pedit") S.ep = x || null;
+  else if (a === "usec") return useCoupon(x).then(() => { toast(S.cp ? "Coupon " + S.cp.code + " saved for checkout" : "Coupon not valid"); render(); });
+  else if (a === "applyc") return useCoupon($("#cc").value.trim()).then(() => { toast(S.cp ? "Coupon applied" : "Coupon not valid or already used"); render(); });
+  else if (a === "psave") { const g = i => $("#e_" + i), t = g("t").value.trim(), pc = Math.round(+g("p").value), id = x === "new" ? "p" + Date.now().toString(36) : x, ex = pr(id), sz = g("z").value.split(",").map(v => v.trim()).filter(Boolean).slice(0, 8);
+    if (!t || !(pc > 0) || !g("c").value) return toast("Add a title, category and selling price");
+    return sv(sb.from("products").upsert({id, title:t, category:g("c").value, emoji:g("e").value || "📦", img_url:safeUrl(g("i").value.trim()), price:pc, stock:Math.max(0, Math.round(+g("s").value || 0)), sizes:sz.length ? sz : ["Standard"], discount:Math.min(50, Math.max(0, Math.round(+g("d").value || 0))), hidden:g("h").checked, sort_order:ex ? ex.sort || 0 : Math.max(0, ...P.map(q => q.sort || 0)) + 1})
+      .then(r => r.error || sb.from("product_costs").upsert({pid:id, cost:Math.max(0, Math.round(+g("b").value || 0))})), "Product saved"); }
+  else if (a === "pdel") { if (confirm("Delete “" + pr(x).title + "”? Past orders keep their record.")) return sv(sb.from("products").delete().eq("id", x), "Product deleted"); }
+  else if (a === "tadd") { const n = $("#tn").value.replace(/\D/g, ""); if (!/^254[17]\d{8}$/.test(n)) return toast("Use the format 2547XXXXXXXX"); return sv(sb.from("admins").insert({phone:n}), "Admin added"); }
+  else if (a === "tdel") return sv(sb.from("admins").delete().eq("phone", x), "Admin removed");
+  else if (a === "cadd") { const n = $("#cn").value.trim(); if (!n) return toast("Enter a category name"); return sv(sb.from("categories").insert({name:n, emoji:$("#ce").value || "📦", color:$("#cl").value, sort_order:Object.keys(CATS).length + 1}), "Category added"); }
+  else if (a === "cdel") { if (confirm("Delete category “" + x + "”?")) return sv(sb.from("categories").delete().eq("name", x), "Category deleted"); }
+  else if (a === "kadd") { const g = i => $("#k_" + i), code = g("c").value.trim().toUpperCase().replace(/[^A-Z0-9]/g, ""), v = Math.round(+g("v").value), h = +g("h").value || 24;
+    if (code.length < 3 || !(v > 0)) return toast("Enter a code (3+ letters) and a value"); if (g("k").value === "percent" && v > 90) return toast("Percent must be 90 or less");
+    return sv(sb.from("coupons").insert({code, kind:g("k").value, value:v, min_order:Math.max(0, Math.round(+g("m").value || 0)), max_uses:+g("u").value > 0 ? Math.round(+g("u").value) : null, ends_at:new Date(Date.now() + h * 36e5).toISOString(), public:g("p").checked}), "Coupon created"); }
+  else if (a === "ctog") return sv(sb.from("coupons").update({active:!S.coupons.find(q => q.code === x).active}).eq("code", x), "Updated");
+  else if (a === "codel") { if (confirm("Delete coupon " + x + "?")) return sv(sb.from("coupons").delete().eq("code", x), "Coupon deleted"); }
   else if (a === "save") return saveAll();
   else if (a === "retry") { loadErr = ""; loaded = false; render(); loadCatalog(); return; }
   if (o) sync(o); render(); });
 document.addEventListener("change", e => { const t = e.target, c = t.dataset.c; if (!c) return; const x = t.dataset.x, f = t.dataset.f, v = t.value;
   if (c === "max") S.max = +v; else if (c === "r4") S.r4 = t.checked; else if (c === "sort") S.sort = v;
+  else if (c === "oq") S.oq = v; else if (c === "pq") S.pq = v; else if (c === "cat") { sv(sb.from("categories").update({[f]: v}).eq("name", x), "Updated"); return; }
   else if (c === "rr") { S.cfg.refReward = Math.max(0, Math.round(+v || 0)); S.dirtyR = true; }
   else if (c === "bf") { S.banners[+x][f] = f === "img" ? safeUrl(v.trim()) : f === "c" ? +v : v; S.dirtyB = true; }
   else if (c === "pf") { const p = pr(x); if (f === "hidden") p.hidden = t.checked; else if (f === "img") p.img = safeUrl(v.trim()); else p[f] = Math.round(Math.max(f === "price" ? 1 : 0, +v || 0)); if (f === "disc") p.disc = Math.min(50, p.disc); S.dirtyP.add(x); }
@@ -330,7 +390,7 @@ addEventListener("hashchange", hash); render(); hash();
 // Banner slider: auto-advances every 4 seconds, dots follow swipes
 setInterval(() => { const c = $("#car"); if (!c || matchMedia("(prefers-reduced-motion:reduce)").matches) return; const n = c.children.length, i = Math.round(c.scrollLeft / c.clientWidth); c.scrollTo({left:((i + 1) % n) * c.clientWidth, behavior:"smooth"}); }, 4000);
 document.addEventListener("scroll", e => { if (e.target.id !== "car") return; const i = Math.round(e.target.scrollLeft / e.target.clientWidth); document.querySelectorAll(".dots i").forEach((d, k) => d.classList.toggle("on", k === i)); }, true);
-if (sb) { sb.auth.getSession().then(async ({data}) => { const u = data.session && data.session.user; if (!u) return; const m = u.email.split("@")[0]; ACC[m] = {name:u.user_metadata.name || "You"}; S.user = m; S.uid = u.id; S.prof = u.user_metadata.prof || null; await loadOrders(); render(); });
+if (sb) { sb.auth.getSession().then(async ({data}) => { const u = data.session && data.session.user; if (!u) return; const m = u.email.split("@")[0]; ACC[m] = {name:u.user_metadata.name || "You"}; S.user = m; S.uid = u.id; S.prof = u.user_metadata.prof || null; await loadOrders(); await loadAdmin(); render(); });
 }
 loadCatalog(); // categories, products and banners
 document.addEventListener("visibilitychange", () => { if (!document.hidden) loadCatalog(); });
