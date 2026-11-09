@@ -184,7 +184,7 @@ const nm = m => { const x = /^(?:\+?254|0)([17]\d{8})$/.exec(String(m).replace(/
 // ===== Catalogue: categories, products and banners from Supabase =====
 const rowP = r => ({id:r.id, title:r.title, category:r.category, image:r.emoji || "📦", img:r.img_url || "", price:r.price, stock:r.stock,
   sizes:r.sizes && r.sizes.length ? r.sizes : ["Standard"], rating:+r.rating, rc:r.rating_count, disc:r.discount, hidden:r.hidden, sort:r.sort_order, farmer:r.farmer || "", loc:r.location || "", season:r.season || []});
-S.wish = LS("sk_wish") || []; S.pst = []; S.bundles = []; S.pts = []; S.subs = []; S.nt = []; S.ly = null; S.dv = {min:0, tiers:[[0,200],[500,120],[1000,0]]}; S.bs = "cards"; S.fs = "panel"; S.ui = LS("sk_ui") || {};
+S.wish = LS("sk_wish") || []; S.pst = []; S.bundles = []; S.pts = []; S.subs = []; S.nt = []; S.ly = null; S.dv = {min:0, tiers:[[0,200],[500,120],[1000,0]]}; S.bs = "cards"; S.fs = "panel"; S.ui = LS("sk_ui") || {}; S.rl = []; S.rw = [];
 const rowB = r => ({id:r.id, t:r.title, s:r.subtitle, img:r.img_url || "", cat:r.target, c:r.color});
 let loaded = false, loadErr = "", lastSig = "";
 function applyCatalog(d) { CATS = {}; (d.c || []).forEach(c => CATS[c.name] = [c.color, c.emoji, c.icon_url || ""]);
@@ -261,7 +261,7 @@ function sync(o) { if (!sb || !S.uid || !o || (o.buyerId !== S.user && !isAdm())
     if (gone) { S.orders = S.orders.filter(q => q !== o); S.cart = []; lastSig = ""; loadCatalog(); } render(); }); }
 async function loadOrders() { const r = await sb.from("orders").select("data").order("created_at"); S.orders = (r.data || []).map(x => x.data);
   S.nid = Math.max(1001, ...S.orders.filter(o => o.buyerId === S.user).map(o => (+String(o.id).split("-").pop() + 1) || 0));
-  const q = await sb.from("referrals").select("code"); S.rf = q.data || []; loadCO(Object.keys(interest())); loadMine(); }
+  const [q, l, w] = await Promise.all([sb.from("referrals").select("code"), sb.from("referral_links").select("code,user_id"), sb.from("referral_rewards").select("*").order("id", {ascending:false})]); S.rf = q.data || []; S.rl = l.data || []; S.rw = w.data || []; loadCO(Object.keys(interest())); loadMine(); }
 
 // ===== Accounts: mobile + 6-digit PIN, no SMS or email verification =====
 function saveProf(f) { S.prof = f; if (sb) sb.auth.updateUser({data:{prof:f}}); else { ACC[S.user].prof = f; LS("bz_acc", ACC); } }
@@ -269,10 +269,13 @@ async function doAuth(m, pn) { const nw = S.mode === "new", n = nw ? $("#an").va
   if (sb) { const cr = {email:m + "@users.sokio.app", password:pn}, {data, error} = nw ? await sb.auth.signUp({...cr, options:{data:{name:n}}}) : await sb.auth.signInWithPassword(cr);
     if (error) return toast(nw ? error.message : "Mobile number or PIN is incorrect"); if (!data.session) return toast("Turn off Confirm email in Supabase Auth settings");
     ACC[m] = {name:data.user.user_metadata.name || n}; S.prof = data.user.user_metadata.prof || null; S.uid = data.user.id;
-    const rf = LS("bz_ref"); if (nw && rf && !S.uid.startsWith(rf)) { await sb.from("referrals").insert({code:rf}); LS("bz_ref", null); }
+    const rf = (nw && $("#ar") ? $("#ar").value.trim().toLowerCase() : "") || LS("bz_ref"); if (nw && rf) { const r = await sb.rpc("claim_referral", {p_code:rf}); LS("bz_ref", null); if (r.data === false) setTimeout(() => toast("Referral code not valid"), 2600); }
     S.user = m; await loadOrders(); await loadAdmin(); }
-  else { if (nw) { if (ACC[m]) return toast("Account exists. Sign in instead"); ACC[m] = {name:n, pin:pn, ref:LS("bz_ref") || ""}; LS("bz_acc", ACC); } else if (!ACC[m] || ACC[m].pin !== pn) return toast("Mobile number or PIN is incorrect"); S.prof = ACC[m].prof || null; }
+  else { if (nw) { if (ACC[m]) return toast("Account exists. Sign in instead"); ACC[m] = {name:n, pin:pn, ref:($("#ar") ? $("#ar").value.trim().toLowerCase() : "") || LS("bz_ref") || ""}; LS("bz_acc", ACC); } else if (!ACC[m] || ACC[m].pin !== pn) return toast("Mobile number or PIN is incorrect"); S.prof = ACC[m].prof || null; }
   S.user = m; LS("bz_user", m); S.view = S.back || "home"; S.back = null; toast("Welcome, " + ACC[m].name); render(); }
+const rsum = s => S.rw.filter(x => x.referrer_code === myCode() && x.status === s).reduce((a, x) => a + x.amount, 0);
+const refClaim = () => S.user && sb && S.uid && !S.rl.some(x => x.user_id === S.uid) && !S.orders.some(o => o.buyerId === S.user) ? `<div class="row" style="margin-top:10px"><input type="text" id="rc" placeholder="Got a referral code?" style="flex:1" autocapitalize="none"><button class="pri" data-a="claimref">Apply</button></div>` : "";
+const rwList = () => S.rw.map(x => `<div class="box kv"><span><b>${esc(x.referrer_code)}</b> · ${R(x.amount)}<br><span class="mu">Order ${esc(x.order_no || "")} · ${esc(x.status)}</span></span>${x.status === "pending" ? `<button class="sec" data-a="rwpay" data-x="${x.id}">Mark paid</button>` : ""}</div>`).join("") || '<p class="mu pad">No referral rewards yet.</p>';
 const myCode = () => S.uid ? S.uid.slice(0, 8) : String(S.user).slice(-6);
 const refN = () => sb ? S.rf.filter(x => x.code === myCode()).length : Object.values(ACC).filter(a => a.ref === myCode()).length;
 
@@ -392,10 +395,10 @@ function account0() { const f = S.prof || {};
   if (S.user) { const n = refN(); return `<div class="box"><b>${esc(ACC[S.user].name)}</b><div class="mu">+${S.user}</div></div>
   <div class="box"><b>1-tap buying</b><p class="mu">Saved address and payment choice, so Buy now places your order in one tap. No card details are stored.</p>
   <p><input type="text" id="fa" placeholder="Delivery address" value="${esc(f.addr || "")}" style="width:100%"></p><div class="row"><input type="text" id="fp" placeholder="Postcode" inputmode="numeric" maxlength="5" value="${esc(f.post || "")}" style="width:110px"><select id="fy"><option value="COD" ${(f.pay || "COD") === "COD" ? "selected" : ""}>Cash on delivery</option><option value="MPESA" ${f.pay === "MPESA" ? "selected" : ""}>M-Pesa (demo)</option></select></div><button class="pri" data-a="setup">Save 1-tap details</button></div>
-  <div class="box"><b>Refer and earn</b><p class="mu">Earn ${R(S.cfg.refReward)} for every friend who joins with your link. Rewards are paid to your M-Pesa.</p><div class="kv"><span>Friends joined</span><b>${n}</b></div><div class="kv"><span>You have earned</span><b>${R(n * S.cfg.refReward)}</b></div><button class="sec" data-a="copyref" style="margin-top:8px">Copy invite link</button></div>
+  <div class="box"><b>Refer and earn</b><p class="mu">Share your code <b>${myCode()}</b>. When a friend signs up with it and their first order is delivered, you earn ${R(S.cfg.refReward)}. Paid to your M-Pesa.</p><div class="kv"><span>Friends joined</span><b>${S.rl.filter(x => x.code === myCode()).length}</b></div><div class="kv"><span>Pending</span><b>${R(rsum("pending"))}</b></div><div class="kv"><span>Paid</span><b>${R(rsum("paid"))}</b></div><div class="row"><button class="sec" data-a="copycode">Copy code</button><button class="sec" data-a="copyref">Copy invite link</button></div>${refClaim()}</div>
   <div class="pad"><button class="sec" data-a="logout">Sign out</button></div>`; }
   const c = S.mode === "new"; return `<div class="box"><div class="row"><button class="sec" aria-pressed="${!c}" data-a="mode" data-x="in" ${c ? "" : 'style="border-color:var(--ac)"'}>Sign in</button><button class="sec" data-a="mode" data-x="new" ${c ? 'style="border-color:var(--ac)"' : ""}>Create account</button></div>
-  ${c ? '<p><label>Name<br><input type="text" id="an" autocomplete="name"></label></p>' : ""}<p><label>Mobile number<br><input type="text" id="am" inputmode="tel" placeholder="07XX XXX XXX" autocomplete="tel"></label></p>
+  ${c ? '<p><label>Name<br><input type="text" id="an" autocomplete="name"></label></p>' : ""}${c ? `<p><label>Referral code (optional)<br><input type="text" id="ar" value="${esc(LS("bz_ref") || "")}" autocapitalize="none" placeholder="Enter a friend's code"></label></p>` : ""}<p><label>Mobile number<br><input type="text" id="am" inputmode="tel" placeholder="07XX XXX XXX" autocomplete="tel"></label></p>
   <p><label>6-digit PIN<br><input type="password" id="ap" inputmode="numeric" maxlength="6" autocomplete="${c ? "new-password" : "current-password"}"></label></p><button class="pri" data-a="auth">${c ? "Create account" : "Sign in"}</button><p class="mu">No code or SMS needed. Choose a 6-digit PIN you will remember.</p></div>`; }
 function admin() { if (!isAdm()) return '<p class="mu pad">Admin only. Sign in with an admin mobile number and this tab opens.</p>';
   const T = ["Overview", "Brand", "Flash", "Orders", "Products", "Categories", "Coupons", "Buy list", "Bundles", "Delivery", "Banners", "Team"], t = S.at || "Overview";
@@ -414,7 +417,7 @@ function aBa() { if (!isAdm()) return '<p class="mu pad">Admin only. Sign in wit
   S.rf.forEach(x => rc[x.code] = (rc[x.code] || 0) + 1); const st = os.filter(o => o.settled), B = S.banners;
   return `<h2>Banners</h2>${B.map((b, k) => `<div class="box"><input type="text" placeholder="Title" value="${esc(b.t)}" data-c="bf" data-x="${k}" data-f="t" style="width:100%"><p><input type="text" placeholder="Subtitle" value="${esc(b.s)}" data-c="bf" data-x="${k}" data-f="s" style="width:100%"></p><p><input type="text" placeholder="Image URL (https, optional)" value="${esc(b.img || "")}" data-c="bf" data-x="${k}" data-f="img" style="width:100%"></p>
   <div class="row"><select data-c="bf" data-x="${k}" data-f="cat" aria-label="Opens">${["All", ...Object.keys(CATS), "Promo"].map(c => `<option ${b.cat === c ? "selected" : ""}>${c}</option>`).join("")}</select><select data-c="bf" data-x="${k}" data-f="c" aria-label="Colour">${["Berry", "Green", "Blue", "Amber"].map((n, c) => `<option value="${c}" ${(b.c || 0) === c ? "selected" : ""}>${n}</option>`).join("")}</select><button class="sec d" data-a="delb" data-x="${k}">Remove</button></div></div>`).join("")}<div class="pad"><button class="sec" data-a="addb">Add banner</button></div>
-  <h2>Refer and earn</h2><div class="box"><label>Reward per friend KSh <input type="number" min="0" value="${S.cfg.refReward}" data-c="rr" style="width:90px"></label></div>
+  <h2>Refer and earn</h2><div class="box"><label>Reward per referred friend (first delivered order) KSh <input type="number" min="0" value="${S.cfg.refReward}" data-c="rr" style="width:90px"></label></div>${rwList()}
   <div class="pad"><button class="pri" data-a="save" style="width:100%">Save changes${dirtyN() ? " (" + dirtyN() + ")" : ""}</button></div>`; }
 function aOr() { const q = (S.oq || "").toLowerCase(), L = [...S.orders].reverse().filter(o => (o.id + o.buyerId + (o.buyerName || "") + o.status).toLowerCase().includes(q));
   return `<div class="pad"><input type="search" placeholder="Search name, phone, order #, status" value="${esc(S.oq || "")}" data-c="oq" style="width:100%"></div>` + (L.map(o => oc(o, "admin")).join("") || '<p class="mu pad">No orders.</p>'); }
@@ -483,6 +486,9 @@ document.addEventListener("click", e => { const b = e.target.closest("[data-a]")
   else if (a === "mode") S.mode = x;
   else if (a === "auth") { const m = nm($("#am").value), pn = $("#ap").value; if (!m) return toast("Enter a valid Kenyan mobile number"); if (!/^\d{6}$/.test(pn)) return toast("PIN must be 6 digits"); return doAuth(m, pn); }
   else if (a === "logout") { S.user = null; LS("bz_user", null); S.prof = null; S.isA = false; if (sb) { sb.auth.signOut(); S.orders = []; S.uid = null; } if (S.view === "admin") S.view = "home"; toast("Signed out"); }
+  else if (a === "copycode") { try { navigator.clipboard.writeText(myCode()).then(() => toast("Code copied"), () => toast(myCode())); } catch (_) { toast(myCode()); } }
+  else if (a === "claimref") { const c = ($("#rc") ? $("#rc").value : "").trim().toLowerCase(); if (!c) return toast("Enter a referral code"); return sb.rpc("claim_referral", {p_code:c}).then(async r => { if (r.data === true) { await loadOrders(); toast("Referral code applied"); } else toast("Code not valid, or you already have orders"); render(); }); }
+  else if (a === "rwpay") return sb.from("referral_rewards").update({status:"paid"}).eq("id", x).then(async () => { await loadOrders(); toast("Marked paid"); render(); });
   else if (a === "copyref") { const u = location.href.split("#")[0] + "#join-" + myCode(); try { navigator.clipboard.writeText(u).then(() => toast("Invite link copied"), () => toast(u)); } catch (_) { toast(u); } }
   else if (a === "cancel") { o.status = "cancelled"; restock(o); toast("Order cancelled"); }
   else if (a === "adv") { const i = FLOW.indexOf(o.status); if (i >= 0 && i < 5) o.status = FLOW[i + 1]; }
